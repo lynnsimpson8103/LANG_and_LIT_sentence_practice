@@ -449,14 +449,14 @@ Then write a SHORT explanation (2-3 sentences, speak to the student as "you") th
 Respond in this exact JSON format only, no other text:
 {"sentence":"...","explanation":"..."}`;
     try {
-      const response = await fetch("https://api.anthropic.com/v1/messages", {
+      const response = await fetch("/api/grade", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 600, messages: [{ role: "user", content: prompt }] })
+        body: JSON.stringify({ prompt })
       });
       const data = await response.json();
-      const text = data.content.map(c => c.text || "").join("");
-      const parsed = JSON.parse(text.replace(/```json|```/g, "").trim());
+      if (data.error) throw new Error(data.error);
+      const parsed = JSON.parse(data.text.replace(/```json|```/g, "").trim());
       setExemplar(parsed);
     } catch (e) { console.error(e); setExemplar({ sentence: "Could not generate an example. Try again.", explanation: "" }); }
     setExemplarLoading(false);
