@@ -119,14 +119,14 @@ ALSO write an IMPROVED version of their sentence if they scored less than perfec
 Respond in this exact JSON format only, no other text:
 {"caps_used":{"pass":true,"note":"..."},"whole_definition":{"pass":true,"note":"..."},"show_dont_tell":{"pass":true,"note":"..."},"grammar":{"pass":true,"note":"..."},"blank_test":{"pass":true,"note":"..."},"feedback":"...","improved":"..."}`;
   try {
-    const response = await fetch("/api/grade", {
+    const response = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ prompt })
+      body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 1000, messages: [{ role: "user", content: prompt }] })
     });
     const data = await response.json();
-    if (data.error) throw new Error(data.error);
-    return JSON.parse(data.text.replace(/```json|```/g, "").trim());
+    const text = data.content.map(c => c.text || "").join("");
+    return JSON.parse(text.replace(/```json|```/g, "").trim());
   } catch (e) { console.error(e); return null; }
 }
 
@@ -134,13 +134,13 @@ const STORAGE_KEYS = { words: "context-quest-words", progress: "context-quest-pr
 
 async function loadData(key, fallback) {
   try {
-    const raw = localStorage.getItem(key);
-    return raw ? JSON.parse(raw) : fallback;
+    const r = await window.storage.get(key);
+    return r ? JSON.parse(r.value) : fallback;
   } catch { return fallback; }
 }
 
 async function saveData(key, value) {
-  try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) { console.error("Save failed:", e); }
+  try { await window.storage.set(key, JSON.stringify(value)); } catch (e) { console.error("Save failed:", e); }
 }
 
 function StarBar({ filled, total }) {
@@ -189,6 +189,23 @@ function WordEditor({ words, onSave, onClose }) {
   const [saved, setSaved] = useState(false);
   const [importMode, setImportMode] = useState(false);
   const [importText, setImportText] = useState("");
+  const [exportMode, setExportMode] = useState(false);
+  const [exportCopied, setExportCopied] = useState(false);
+
+  const generateExportCode = () => {
+    const lines = list.map(w => {
+      const esc = (s) => s.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+      return `  { word: "${esc(w.word)}", roots: "${esc(w.roots || "")}", definition: "${esc(w.definition || "")}", hint: "${esc(w.hint || "Think about what the full word means, not just the roots.")}" }`;
+    });
+    return `const DEFAULT_WORDS = [\n${lines.join(",\n")}\n];`;
+  };
+
+  const handleCopyExport = () => {
+    navigator.clipboard.writeText(generateExportCode()).then(() => {
+      setExportCopied(true);
+      setTimeout(() => setExportCopied(false), 2500);
+    });
+  };
 
   const openEdit = (idx) => { setEditIdx(idx); setForm({ ...list[idx] }); setConfirmDelete(null); };
   const openAdd = () => { setEditIdx(-1); setForm({ word: "", roots: "", definition: "", hint: "" }); setConfirmDelete(null); };
@@ -347,6 +364,42 @@ function WordEditor({ words, onSave, onClose }) {
         fontFamily: "var(--mono)", fontSize: 14, fontWeight: 700,
         letterSpacing: "0.08em", cursor: "pointer", transition: "all 0.3s"
       }}>{saved ? "✓ SAVED!" : `SAVE WORD BANK (${list.length} words)`}</button>
+
+      {/* Export */}
+      <button onClick={() => { setExportMode(!exportMode); setExportCopied(false); }} style={{
+        display: "block", width: "100%", padding: "12px", marginTop: 8,
+        background: "#252119", border: "1px solid #3a3530", borderRadius: 8,
+        color: "#d4c9b8", fontSize: 12, fontFamily: "var(--mono)", cursor: "pointer", textAlign: "center"
+      }}>📤 {exportMode ? "Hide" : "Export word bank as code"}</button>
+
+      {exportMode && (
+        <div style={{ marginTop: 8, animation: "fadeSlide 0.2s ease" }}>
+          <div style={{ fontSize: 11, fontFamily: "var(--mono)", color: "#8a8278", marginBottom: 6, lineHeight: 1.6 }}>
+            Copy the code below, then go to your GitHub repo → <b>src/App.jsx</b> → click the pencil icon to edit → find the old <code style={{ background: "#2e2a24", padding: "2px 5px", borderRadius: 3 }}>const DEFAULT_WORDS = [...];</code> block at the top and replace it with this.
+          </div>
+          <textarea
+            readOnly
+            value={generateExportCode()}
+            rows={Math.min(list.length + 3, 15)}
+            style={{
+              width: "100%", padding: "12px", background: "#1a1814",
+              border: "1px solid #3a3530", borderRadius: 6, color: "#b8a990",
+              fontSize: 12, fontFamily: "var(--mono)", lineHeight: 1.5,
+              resize: "vertical", outline: "none", boxSizing: "border-box"
+            }}
+            onFocus={e => e.target.select()}
+          />
+          <button onClick={handleCopyExport} style={{
+            display: "block", width: "100%", padding: "12px", marginTop: 6,
+            background: exportCopied ? "#2a3a2a" : "#2e2a24",
+            border: `1px solid ${exportCopied ? "#3a5a3a" : "#3a3530"}`,
+            borderRadius: 8,
+            color: exportCopied ? "#6abe6a" : "#d4c9b8",
+            fontSize: 13, fontFamily: "var(--mono)", fontWeight: 700,
+            cursor: "pointer", transition: "all 0.3s"
+          }}>{exportCopied ? "✓ COPIED TO CLIPBOARD!" : "COPY CODE"}</button>
+        </div>
+      )}
     </div>
   );
 }
@@ -369,7 +422,44 @@ export default function ContextClueGame() {
   const [particles, setParticles] = useState([]);
   const [celebration, setCelebration] = useState(false);
   const [loaded, setLoaded] = useState(false);
+  const [attempts, setAttempts] = useState({});
+  const [exemplar, setExemplar] = useState(null);
+  const [exemplarLoading, setExemplarLoading] = useState(false);
   const textareaRef = useRef(null);
+
+  const generateExemplar = async () => {
+    if (!word || exemplarLoading) return;
+    setExemplarLoading(true);
+    const prompt = `You are helping a 12-year-old student learn to write vocabulary sentences with strong context clues. The student has tried 3 times and is stuck.
+
+Word: ${word.word}
+Roots: ${word.roots}
+Definition: ${word.definition}
+
+Write ONE exemplar sentence that:
+1. Uses the word "${word.word}" in the sentence
+2. Has context clues in ALL CAPS
+3. SHOWS the meaning through a vivid scene or action (not just restating the definition)
+4. Would pass the Blank Test (someone could guess the word from the caps alone)
+5. Is age-appropriate and interesting for a 12-year-old
+
+Then write a SHORT explanation (2-3 sentences, speak to the student as "you") that breaks down WHY the sentence works — what makes the caps effective, how the scene shows the meaning.
+
+Respond in this exact JSON format only, no other text:
+{"sentence":"...","explanation":"..."}`;
+    try {
+      const response = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 600, messages: [{ role: "user", content: prompt }] })
+      });
+      const data = await response.json();
+      const text = data.content.map(c => c.text || "").join("");
+      const parsed = JSON.parse(text.replace(/```json|```/g, "").trim());
+      setExemplar(parsed);
+    } catch (e) { console.error(e); setExemplar({ sentence: "Could not generate an example. Try again.", explanation: "" }); }
+    setExemplarLoading(false);
+  };
 
   useEffect(() => {
     (async () => {
@@ -393,7 +483,7 @@ export default function ContextClueGame() {
 
   const startWord = (idx) => {
     if (!words[idx].definition) { setScreen("editor"); return; }
-    setCurrentIdx(idx); setSentence(""); setResult(null); setShowHint(false); setShowImproved(false); setScreen("play");
+    setCurrentIdx(idx); setSentence(""); setResult(null); setShowHint(false); setShowImproved(false); setExemplar(null); setScreen("play");
     setTimeout(() => textareaRef.current?.focus(), 100);
   };
 
@@ -438,6 +528,7 @@ export default function ContextClueGame() {
 
     setXp(newXp); setStreak(newStreak); setBestStreak(newBest); setCompletedWords(newCompleted);
     setResult({ scores, stars, earned, streakBonus, totalEarned, feedback: res.feedback, improved: res.improved, perfect });
+    if (!perfect) setAttempts(prev => ({ ...prev, [currentIdx]: (prev[currentIdx] || 0) + 1 }));
     saveProgress(newXp, newBest, newCompleted);
     if (perfect) { setCelebration(true); spawnParticles(); setTimeout(() => setCelebration(false), 1500); }
   };
@@ -569,6 +660,21 @@ export default function ContextClueGame() {
 
             {!result && (
               <div>
+                {/* Show exemplar as reference if already generated */}
+                {exemplar && exemplar.sentence && (
+                  <div style={{
+                    background: "linear-gradient(135deg, #1e2530, #252535)",
+                    border: "1px solid #3a4555", borderRadius: 8,
+                    padding: "12px 14px", marginBottom: 12
+                  }}>
+                    <div style={{ fontSize: 10, fontFamily: "var(--mono)", color: "#7ab5e0", letterSpacing: "0.1em", marginBottom: 6 }}>
+                      🎓 EXAMPLE FOR REFERENCE — write your own version!
+                    </div>
+                    <div style={{ fontSize: 13, lineHeight: 1.6, color: "#9ab5d0" }}>
+                      <HighlightCaps text={exemplar.sentence} />
+                    </div>
+                  </div>
+                )}
                 <div style={{ fontSize: 11, fontFamily: "var(--mono)", color: "#8a8278", marginBottom: 6 }}>WRITE YOUR SENTENCE (context clues in ALL CAPS):</div>
                 <textarea ref={textareaRef} value={sentence} onChange={e => setSentence(e.target.value)}
                   placeholder={`Write a sentence using "${word.word}" with context clues in ALL CAPS...`}
@@ -660,6 +766,51 @@ export default function ContextClueGame() {
                   </div>
                 )}
 
+                {/* Exemplar — unlocks after 3 non-perfect attempts */}
+                {!result.perfect && (attempts[currentIdx] || 0) >= 3 && (
+                  <div style={{ marginBottom: 12 }}>
+                    {!exemplar ? (
+                      <button onClick={generateExemplar} disabled={exemplarLoading} style={{
+                        display: "block", width: "100%", padding: "12px 14px",
+                        background: "linear-gradient(135deg, #1e2530, #252535)",
+                        border: "1px solid #3a4555", borderRadius: 8,
+                        color: "#7ab5e0", fontSize: 12, fontFamily: "var(--mono)",
+                        cursor: exemplarLoading ? "default" : "pointer", textAlign: "left",
+                        animation: "fadeSlide 0.3s ease"
+                      }}>
+                        <div style={{ fontWeight: 700, marginBottom: 2 }}>
+                          {exemplarLoading ? "⏳ Generating example..." : "🎓 Show me an example sentence"}
+                        </div>
+                        <div style={{ fontSize: 11, color: "#5a8ab5" }}>
+                          You've tried {attempts[currentIdx]} times — here's a model to learn from
+                        </div>
+                      </button>
+                    ) : (
+                      <div style={{
+                        background: "linear-gradient(135deg, #1e2530, #252535)",
+                        border: "1px solid #3a4555", borderRadius: 10,
+                        padding: "16px 18px", animation: "fadeSlide 0.3s ease"
+                      }}>
+                        <div style={{ fontSize: 10, fontFamily: "var(--mono)", color: "#7ab5e0", letterSpacing: "0.1em", marginBottom: 8 }}>
+                          🎓 EXEMPLAR SENTENCE
+                        </div>
+                        <div style={{ fontSize: 15, lineHeight: 1.7, color: "#d4c9b8", marginBottom: 12, padding: "10px 14px", background: "#1a1e28", borderRadius: 6, borderLeft: "3px solid #5a8ab5" }}>
+                          <HighlightCaps text={exemplar.sentence || ""} />
+                        </div>
+                        {exemplar.explanation && (
+                          <div style={{ fontSize: 13, lineHeight: 1.6, color: "#8aaccc" }}>
+                            <div style={{ fontSize: 10, fontFamily: "var(--mono)", color: "#5a8ab5", letterSpacing: "0.08em", marginBottom: 4 }}>WHY THIS WORKS</div>
+                            {exemplar.explanation}
+                          </div>
+                        )}
+                        <div style={{ marginTop: 10, fontSize: 11, color: "#5a6a7a", fontFamily: "var(--mono)", fontStyle: "italic" }}>
+                          Now try writing your OWN sentence inspired by this — don't copy it!
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
                   <button onClick={handleRetry} style={{
                     flex: 1, padding: "13px", background: "#252119", border: "1px solid #3a3530",
@@ -690,3 +841,4 @@ export default function ContextClueGame() {
     </div>
   );
 }
+
