@@ -119,13 +119,14 @@ ALSO write an IMPROVED version of their sentence if they scored less than perfec
 Respond in this exact JSON format only, no other text:
 {"caps_used":{"pass":true,"note":"..."},"whole_definition":{"pass":true,"note":"..."},"show_dont_tell":{"pass":true,"note":"..."},"grammar":{"pass":true,"note":"..."},"blank_test":{"pass":true,"note":"..."},"feedback":"...","improved":"..."}`;
   try {
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 1000, messages: [{ role: "user", content: prompt }] })
-    });
-    const data = await response.json();
-    const text = data.content.map(c => c.text || "").join("");
+    const response = await fetch("/api/grade", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt })
+      });
+      const data = await response.json();
+      if (data.error) throw new Error(data.error);
+      const text = data.text;
     return JSON.parse(text.replace(/```json|```/g, "").trim());
   } catch (e) { console.error(e); return null; }
 }
